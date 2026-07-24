@@ -1,5 +1,58 @@
 use anyhow::{Context, Result, anyhow, bail};
-use std::env;
+use clap::{ArgGroup, Parser};
+use std::num::NonZeroU32;
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "cutty",
+    version,
+    about = "Capture a top-level window belonging to a process and save it as a PNG",
+    group(
+        ArgGroup::new("target")
+            .required(true)
+            .multiple(false)
+            .args(["pid", "process"])
+    )
+)]
+struct CliArgs {
+    /// Target process ID.
+    #[arg(short = 'p', long, value_name = "PID")]
+    pid: Option<NonZeroU32>,
+
+    /// Target executable filename.
+    #[arg(
+        short = 'P',
+        long,
+        value_name = "IMAGE_NAME",
+        value_parser = clap::builder::NonEmptyStringValueParser::new()
+    )]
+    process: Option<String>,
+
+    /// Choose a zero-based window from --list output.
+    #[arg(short = 'w', long = "window", value_name = "INDEX")]
+    window_index: Option<usize>,
+
+    /// Resize landscape captures.
+    #[arg(short = 'r', long, value_name = "VALUE", value_parser = parse_resize_value)]
+    resize: Option<Resize>,
+
+    /// Resize portrait captures; accepts the same expressions as --resize.
+    #[arg(
+        short = 'R',
+        long = "resize-vertical",
+        value_name = "VALUE",
+        value_parser = parse_resize_value
+    )]
+    resize_vertical: Option<Resize>,
+
+    /// List matching windows without taking a screenshot.
+    #[arg(
+        short = 'l',
+        long = "list",
+        conflicts_with_all = ["resize", "resize_vertical"]
+    )]
+    list_only: bool,
+}
 
 #[derive(Debug, PartialEq)]
 struct Args {
@@ -10,13 +63,39 @@ struct Args {
     list_only: bool,
 }
 
+impl From<CliArgs> for Args {
+    fn from(cli: CliArgs) -> Self {
+        let CliArgs {
+            pid,
+            process,
+            window_index,
+            resize,
+            resize_vertical,
+            list_only,
+        } = cli;
+        let target = match (pid, process) {
+            (Some(pid), None) => Target::Pid(pid.get()),
+            (None, Some(process)) => Target::ProcessName(process),
+            _ => unreachable!("clap validates the required target group"),
+        };
+
+        Self {
+            target,
+            window_index,
+            resize,
+            resize_vertical,
+            list_only,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum Target {
     Pid(u32),
     ProcessName(String),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum Resize {
     Scale(f64),
     Height(u32),
@@ -103,7 +182,7 @@ fn main() {
 }
 
 fn try_main() -> Result<()> {
-    let args = parse_args(env::args().skip(1))?;
+    let args: Args = CliArgs::parse().into();
 
     #[cfg(windows)]
     {
@@ -117,84 +196,15 @@ fn try_main() -> Result<()> {
     }
 }
 
-fn parse_args(arguments: impl IntoIterator<Item = String>) -> Result<Args> {
-    let mut arguments = arguments.into_iter();
-    let mut target = None;
-    let mut window_index = None;
-    let mut resize = None;
-    let mut resize_vertical = None;
-    let mut list_only = false;
+#[cfg(test)]
+fn parse_args(
+    arguments: impl IntoIterator<Item = String>,
+) -> std::result::Result<Args, clap::Error> {
+    CliArgs::try_parse_from(std::iter::once("cutty".to_owned()).chain(arguments)).map(Into::into)
+}
 
-    while let Some(argument) = arguments.next() {
-        match argument.as_str() {
-            "--pid" => {
-                ensure_target_is_unset(&target)?;
-                let value = next_value(&mut arguments, "--pid")?;
-                let pid = value
-                    .parse()
-                    .with_context(|| format!("--pid must be a positive integer, got {value:?}"))?;
-                if pid == 0 {
-                    bail!("--pid must be greater than zero");
-                }
-                target = Some(Target::Pid(pid));
-            }
-            "--process" => {
-                ensure_target_is_unset(&target)?;
-                let name = next_value(&mut arguments, "--process")?;
-                if name.is_empty() {
-                    bail!("--process cannot be empty");
-                }
-                target = Some(Target::ProcessName(name));
-            }
-            "--window" => {
-                if window_index.is_some() {
-                    bail!("--window may only be supplied once");
-                }
-                let value = next_value(&mut arguments, "--window")?;
-                window_index = Some(value.parse().with_context(|| {
-                    format!("--window must be a zero-based integer, got {value:?}")
-                })?);
-            }
-            "--resize" | "-r" => {
-                if resize.is_some() {
-                    bail!("--resize may only be supplied once");
-                }
-                resize = Some(parse_resize(&next_value(&mut arguments, "--resize")?)?);
-            }
-            "--resize-vertical" | "-R" => {
-                if resize_vertical.is_some() {
-                    bail!("--resize-vertical may only be supplied once");
-                }
-                resize_vertical = Some(parse_resize(&next_value(
-                    &mut arguments,
-                    "--resize-vertical",
-                )?)?);
-            }
-            "--list" => {
-                if list_only {
-                    bail!("--list may only be supplied once");
-                }
-                list_only = true;
-            }
-            "-h" | "--help" => {
-                print_usage();
-                std::process::exit(0);
-            }
-            _ => bail!("unknown argument {argument:?}\n\n{}", usage()),
-        }
-    }
-
-    let target = target.ok_or_else(|| anyhow!("a target is required\n\n{}", usage()))?;
-    if list_only && (resize.is_some() || resize_vertical.is_some()) {
-        bail!("--resize and --resize-vertical cannot be used with --list");
-    }
-    Ok(Args {
-        target,
-        window_index,
-        resize,
-        resize_vertical,
-        list_only,
-    })
+fn parse_resize_value(value: &str) -> std::result::Result<Resize, String> {
+    parse_resize(value).map_err(|error| error.to_string())
 }
 
 fn parse_resize(value: &str) -> Result<Resize> {
@@ -273,27 +283,6 @@ fn parse_resize_pixels(numeric: &str, value: &str) -> Result<u32> {
         bail!("--resize pixels must be greater than zero, got {value:?}");
     }
     Ok(pixels)
-}
-
-fn ensure_target_is_unset(target: &Option<Target>) -> Result<()> {
-    if target.is_some() {
-        bail!("specify exactly one of --pid or --process");
-    }
-    Ok(())
-}
-
-fn next_value(arguments: &mut impl Iterator<Item = String>, option: &str) -> Result<String> {
-    arguments
-        .next()
-        .ok_or_else(|| anyhow!("{option} requires a value"))
-}
-
-fn print_usage() {
-    println!("{}", usage());
-}
-
-fn usage() -> &'static str {
-    "Usage:\n  cutty (--pid PID | --process IMAGE_NAME) [--window INDEX] [--resize VALUE] [--resize-vertical VALUE] [--list]\n\nCaptures a visible, non-minimized top-level window as a PNG in the system\ntemporary directory. --process matches an executable filename case-insensitively\n(for example, notepad.exe).\n\nOptions:\n  --pid PID             Target process ID\n  --process IMAGE_NAME  Target executable file name\n  --window INDEX        Choose a zero-based window from --list output\n  -r, --resize VALUE    Resize landscape captures: 0.5x, 640h, 640w, 640s, 640b, min(A, B), or max(A, B)\n  -R, --resize-vertical VALUE\n                        Resize portrait captures; accepts the same expressions as --resize\n  --list                List matching windows without taking a screenshot\n  -h, --help            Show this help"
 }
 
 #[cfg(windows)]
@@ -859,6 +848,31 @@ mod tests {
             Args {
                 target: Target::Pid(42),
                 window_index: Some(3),
+                resize: None,
+                resize_vertical: None,
+                list_only: true,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_short_options() {
+        assert_eq!(
+            parse_args(["-p", "42", "-w", "3", "-r", "640w", "-R", "640h"].map(str::to_owned))
+                .unwrap(),
+            Args {
+                target: Target::Pid(42),
+                window_index: Some(3),
+                resize: Some(Resize::Width(640)),
+                resize_vertical: Some(Resize::Height(640)),
+                list_only: false,
+            }
+        );
+        assert_eq!(
+            parse_args(["-P", "notepad.exe", "-l"].map(str::to_owned)).unwrap(),
+            Args {
+                target: Target::ProcessName("notepad.exe".to_owned()),
+                window_index: None,
                 resize: None,
                 resize_vertical: None,
                 list_only: true,
