@@ -1,0 +1,58 @@
+name: Release Windows package
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # GitHub tag filters are globs, so validate the exact vX.Y.Z format below.
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Validate release tag and Cargo version
+        id: version
+        shell: pwsh
+        run: |
+          $tag = '${{ github.ref_name }}'
+          if ($tag -notmatch '^v\d+\.\d+\.\d+$') {
+            throw "Release tags must use the vX.Y.Z format; received '$tag'."
+          }
+
+          $tagVersion = $tag.Substring(1)
+          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $package = $metadata.packages | Where-Object { $_.name -eq 'cutty' } | Select-Object -First 1
+          if ($null -eq $package -or $package.version -ne $tagVersion) {
+            throw "Tag version '$tagVersion' must match cutty's Cargo.toml version '$($package.version)'."
+          }
+
+          "version=$tagVersion" >> $env:GITHUB_OUTPUT
+
+      - name: Build release binary
+        run: cargo build --locked --release
+
+      - name: Create Windows archive
+        id: package
+        shell: pwsh
+        run: |
+          $archive = "cutty-v${{ steps.version.outputs.version }}-windows-x86_64.zip"
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path target\release\cutty.exe -DestinationPath "dist\$archive"
+          "archive=dist/$archive" >> $env:GITHUB_OUTPUT
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: ${{ steps.package.outputs.archive }}
+          fail_on_unmatched_files: true

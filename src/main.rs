@@ -1,10 +1,12 @@
 use anyhow::{Context, Result, anyhow, bail};
 use std::env;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 struct Args {
     target: Target,
     window_index: Option<usize>,
+    resize: Option<Resize>,
+    resize_vertical: Option<Resize>,
     list_only: bool,
 }
 
@@ -12,6 +14,85 @@ struct Args {
 enum Target {
     Pid(u32),
     ProcessName(String),
+}
+
+#[derive(Debug, PartialEq)]
+enum Resize {
+    Scale(f64),
+    Height(u32),
+    Width(u32),
+    Small(u32),
+    Big(u32),
+    Min(Vec<Self>),
+    Max(Vec<Self>),
+}
+
+impl Resize {
+    fn dimensions(&self, width: u32, height: u32) -> Result<(u32, u32)> {
+        match self {
+            Self::Scale(scale) => Ok((
+                scaled_dimension(width, *scale)?,
+                scaled_dimension(height, *scale)?,
+            )),
+            Self::Height(target_height) => Ok((
+                scaled_dimension(width, f64::from(*target_height) / f64::from(height))?,
+                *target_height,
+            )),
+            Self::Width(target_width) => Ok((
+                *target_width,
+                scaled_dimension(height, f64::from(*target_width) / f64::from(width))?,
+            )),
+            Self::Small(target) if width >= height => {
+                Self::Height(*target).dimensions(width, height)
+            }
+            Self::Small(target) => Self::Width(*target).dimensions(width, height),
+            Self::Big(target) if width >= height => Self::Width(*target).dimensions(width, height),
+            Self::Big(target) => Self::Height(*target).dimensions(width, height),
+            Self::Min(resizes) => select_expression_dimensions(resizes, width, height, true),
+            Self::Max(resizes) => select_expression_dimensions(resizes, width, height, false),
+        }
+    }
+}
+
+fn select_expression_dimensions(
+    resizes: &[Resize],
+    width: u32,
+    height: u32,
+    select_smallest: bool,
+) -> Result<(u32, u32)> {
+    let mut selected = None;
+    for resize in resizes {
+        let candidate = resize.dimensions(width, height)?;
+        match selected {
+            Some((_, selected_height))
+                if (select_smallest && selected_height <= candidate.1)
+                    || (!select_smallest && selected_height >= candidate.1) => {}
+            _ => selected = Some(candidate),
+        }
+    }
+    selected.ok_or_else(|| anyhow!("resize expression requires at least two values"))
+}
+
+fn select_resize<'a>(
+    resize: Option<&'a Resize>,
+    resize_vertical: Option<&'a Resize>,
+    width: u32,
+    height: u32,
+) -> Option<&'a Resize> {
+    match (resize, resize_vertical) {
+        (Some(resize), None) | (None, Some(resize)) => Some(resize),
+        (Some(resize), Some(_)) if width > height => Some(resize),
+        (Some(_), Some(resize_vertical)) if height > width => Some(resize_vertical),
+        _ => None,
+    }
+}
+
+fn scaled_dimension(dimension: u32, scale: f64) -> Result<u32> {
+    let scaled = f64::from(dimension) * scale;
+    if !scaled.is_finite() || scaled > f64::from(u32::MAX) {
+        bail!("resized image dimensions are too large")
+    }
+    Ok(scaled.round().max(1.0) as u32)
 }
 
 fn main() {
@@ -40,6 +121,8 @@ fn parse_args(arguments: impl IntoIterator<Item = String>) -> Result<Args> {
     let mut arguments = arguments.into_iter();
     let mut target = None;
     let mut window_index = None;
+    let mut resize = None;
+    let mut resize_vertical = None;
     let mut list_only = false;
 
     while let Some(argument) = arguments.next() {
@@ -72,6 +155,21 @@ fn parse_args(arguments: impl IntoIterator<Item = String>) -> Result<Args> {
                     format!("--window must be a zero-based integer, got {value:?}")
                 })?);
             }
+            "--resize" | "-r" => {
+                if resize.is_some() {
+                    bail!("--resize may only be supplied once");
+                }
+                resize = Some(parse_resize(&next_value(&mut arguments, "--resize")?)?);
+            }
+            "--resize-vertical" | "-R" => {
+                if resize_vertical.is_some() {
+                    bail!("--resize-vertical may only be supplied once");
+                }
+                resize_vertical = Some(parse_resize(&next_value(
+                    &mut arguments,
+                    "--resize-vertical",
+                )?)?);
+            }
             "--list" => {
                 if list_only {
                     bail!("--list may only be supplied once");
@@ -87,11 +185,94 @@ fn parse_args(arguments: impl IntoIterator<Item = String>) -> Result<Args> {
     }
 
     let target = target.ok_or_else(|| anyhow!("a target is required\n\n{}", usage()))?;
+    if list_only && (resize.is_some() || resize_vertical.is_some()) {
+        bail!("--resize and --resize-vertical cannot be used with --list");
+    }
     Ok(Args {
         target,
         window_index,
+        resize,
+        resize_vertical,
         list_only,
     })
+}
+
+fn parse_resize(value: &str) -> Result<Resize> {
+    let value = value.trim();
+    for (name, constructor) in [
+        ("min", Resize::Min as fn(Vec<Resize>) -> Resize),
+        ("max", Resize::Max),
+    ] {
+        if let Some(arguments) = value
+            .strip_prefix(name)
+            .and_then(|value| value.strip_prefix('('))
+            .and_then(|value| value.strip_suffix(')'))
+        {
+            return Ok(constructor(parse_resize_expression_arguments(arguments)?));
+        }
+    }
+    parse_resize_spec(value)
+}
+
+fn parse_resize_expression_arguments(arguments: &str) -> Result<Vec<Resize>> {
+    let mut resizes = Vec::new();
+    let mut depth = 0;
+    let mut start = 0;
+
+    for (index, character) in arguments.char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' if depth == 0 => bail!("unexpected ')' in resize expression"),
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                resizes.push(parse_resize(&arguments[start..index])?);
+                start = index + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        bail!("unclosed '(' in resize expression");
+    }
+    resizes.push(parse_resize(&arguments[start..])?);
+    if resizes.len() < 2 {
+        bail!("resize expression requires at least two values");
+    }
+    Ok(resizes)
+}
+
+fn parse_resize_spec(value: &str) -> Result<Resize> {
+    let Some(descriptor) = value.chars().last() else {
+        bail!("--resize must look like 0.5x, 640h, 640w, 640s, or 640b, got {value:?}");
+    };
+    let numeric = &value[..value.len() - descriptor.len_utf8()];
+
+    match descriptor {
+        'x' => {
+            let scale: f64 = numeric.parse().with_context(|| {
+                format!("--resize scale must be a positive number, got {value:?}")
+            })?;
+            if !scale.is_finite() || scale <= 0.0 {
+                bail!("--resize scale must be a positive finite number, got {value:?}");
+            }
+            Ok(Resize::Scale(scale))
+        }
+        'h' => Ok(Resize::Height(parse_resize_pixels(numeric, value)?)),
+        'w' => Ok(Resize::Width(parse_resize_pixels(numeric, value)?)),
+        's' => Ok(Resize::Small(parse_resize_pixels(numeric, value)?)),
+        'b' => Ok(Resize::Big(parse_resize_pixels(numeric, value)?)),
+        _ => bail!("--resize must end in x, h, w, s, or b, got {value:?}"),
+    }
+}
+
+fn parse_resize_pixels(numeric: &str, value: &str) -> Result<u32> {
+    let pixels: u32 = numeric
+        .parse()
+        .with_context(|| format!("--resize pixels must be a positive integer, got {value:?}"))?;
+    if pixels == 0 {
+        bail!("--resize pixels must be greater than zero, got {value:?}");
+    }
+    Ok(pixels)
 }
 
 fn ensure_target_is_unset(target: &Option<Target>) -> Result<()> {
@@ -112,14 +293,14 @@ fn print_usage() {
 }
 
 fn usage() -> &'static str {
-    "Usage:\n  cutty (--pid PID | --process IMAGE_NAME) [--window INDEX] [--list]\n\nCaptures a visible, non-minimized top-level window as a PNG in the system\ntemporary directory. --process matches an executable filename case-insensitively\n(for example, notepad.exe).\n\nOptions:\n  --pid PID             Target process ID\n  --process IMAGE_NAME  Target executable file name\n  --window INDEX        Choose a zero-based window from --list output\n  --list                List matching windows without taking a screenshot\n  -h, --help            Show this help"
+    "Usage:\n  cutty (--pid PID | --process IMAGE_NAME) [--window INDEX] [--resize VALUE] [--resize-vertical VALUE] [--list]\n\nCaptures a visible, non-minimized top-level window as a PNG in the system\ntemporary directory. --process matches an executable filename case-insensitively\n(for example, notepad.exe).\n\nOptions:\n  --pid PID             Target process ID\n  --process IMAGE_NAME  Target executable file name\n  --window INDEX        Choose a zero-based window from --list output\n  -r, --resize VALUE    Resize landscape captures: 0.5x, 640h, 640w, 640s, 640b, min(A, B), or max(A, B)\n  -R, --resize-vertical VALUE\n                        Resize portrait captures; accepts the same expressions as --resize\n  --list                List matching windows without taking a screenshot\n  -h, --help            Show this help"
 }
 
 #[cfg(windows)]
 mod windows_capture {
-    use super::{Args, Target};
+    use super::{Args, Resize, Target, select_resize};
     use anyhow::{Context, Result, anyhow, bail};
-    use image::{DynamicImage, ImageFormat, RgbImage};
+    use image::{DynamicImage, ImageFormat, RgbImage, imageops::FilterType};
     use std::collections::BTreeSet;
     use std::env;
     use std::fs::OpenOptions;
@@ -201,6 +382,13 @@ mod windows_capture {
                 .with_context(|| format!("could not capture window {index} of process {pid}"))?;
         let image = RgbImage::from_raw(width, height, pixels)
             .ok_or_else(|| anyhow!("captured pixel buffer has an invalid size"))?;
+        let resize = select_resize(
+            args.resize.as_ref(),
+            args.resize_vertical.as_ref(),
+            width,
+            height,
+        );
+        let image = resize_image(image, resize)?;
         let output = temporary_output_path(pid);
         save_png(&image, &output)?;
 
@@ -618,6 +806,19 @@ mod windows_capture {
         }
     }
 
+    fn resize_image(image: RgbImage, resize: Option<&Resize>) -> Result<RgbImage> {
+        let Some(resize) = resize else {
+            return Ok(image);
+        };
+        let (width, height) = resize.dimensions(image.width(), image.height())?;
+        Ok(image::imageops::resize(
+            &image,
+            width,
+            height,
+            FilterType::Lanczos3,
+        ))
+    }
+
     fn temporary_output_path(pid: u32) -> PathBuf {
         let milliseconds = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -649,7 +850,7 @@ mod windows_capture {
 
 #[cfg(test)]
 mod tests {
-    use super::{Args, Target, parse_args};
+    use super::{Args, Resize, Target, parse_args, select_resize};
 
     #[test]
     fn parses_pid_target_and_options() {
@@ -658,6 +859,8 @@ mod tests {
             Args {
                 target: Target::Pid(42),
                 window_index: Some(3),
+                resize: None,
+                resize_vertical: None,
                 list_only: true,
             }
         );
@@ -670,6 +873,8 @@ mod tests {
             Args {
                 target: Target::ProcessName("notepad.exe".to_owned()),
                 window_index: None,
+                resize: None,
+                resize_vertical: None,
                 list_only: false,
             }
         );
@@ -680,5 +885,136 @@ mod tests {
         assert!(
             parse_args(["--pid", "42", "--process", "notepad.exe"].map(str::to_owned)).is_err()
         );
+    }
+
+    #[test]
+    fn parses_resize_descriptors_and_expressions() {
+        for (value, expected) in [
+            ("0.5x", Resize::Scale(0.5)),
+            ("640h", Resize::Height(640)),
+            ("640w", Resize::Width(640)),
+            ("640s", Resize::Small(640)),
+            ("640b", Resize::Big(640)),
+            (
+                "min(0.5x, 640h)",
+                Resize::Min(vec![Resize::Scale(0.5), Resize::Height(640)]),
+            ),
+            (
+                "max(0.5x, 640h)",
+                Resize::Max(vec![Resize::Scale(0.5), Resize::Height(640)]),
+            ),
+            (
+                "min(max(2x, 640h), 0.5x)",
+                Resize::Min(vec![
+                    Resize::Max(vec![Resize::Scale(2.0), Resize::Height(640)]),
+                    Resize::Scale(0.5),
+                ]),
+            ),
+        ] {
+            let args = parse_args(["--pid", "42", "-r", value].map(str::to_owned)).unwrap();
+            assert_eq!(args.resize, Some(expected));
+        }
+
+        let args =
+            parse_args(["--pid", "42", "-r", "640w", "-R", "min(0.5x, 640h)"].map(str::to_owned))
+                .unwrap();
+        assert_eq!(args.resize, Some(Resize::Width(640)));
+        assert_eq!(
+            args.resize_vertical,
+            Some(Resize::Min(vec![Resize::Scale(0.5), Resize::Height(640)]))
+        );
+    }
+
+    #[test]
+    fn calculates_resized_dimensions() {
+        assert_eq!(
+            Resize::Scale(0.5).dimensions(1920, 1080).unwrap(),
+            (960, 540)
+        );
+        assert_eq!(
+            Resize::Height(640).dimensions(1920, 1080).unwrap(),
+            (1138, 640)
+        );
+        assert_eq!(
+            Resize::Width(640).dimensions(1920, 1080).unwrap(),
+            (640, 360)
+        );
+        assert_eq!(
+            Resize::Small(540).dimensions(1920, 1080).unwrap(),
+            (960, 540)
+        );
+        assert_eq!(
+            Resize::Small(540).dimensions(1080, 1920).unwrap(),
+            (540, 960)
+        );
+        assert_eq!(Resize::Big(540).dimensions(1920, 1080).unwrap(), (540, 304));
+        assert_eq!(Resize::Big(540).dimensions(1080, 1920).unwrap(), (304, 540));
+        assert_eq!(
+            Resize::Min(vec![Resize::Scale(0.5), Resize::Height(640)])
+                .dimensions(1920, 1080)
+                .unwrap(),
+            (960, 540)
+        );
+        assert_eq!(
+            Resize::Max(vec![Resize::Scale(0.5), Resize::Height(640)])
+                .dimensions(1920, 1080)
+                .unwrap(),
+            (1138, 640)
+        );
+    }
+
+    #[test]
+    fn selects_resize_by_orientation() {
+        let landscape = Resize::Width(640);
+        let portrait = Resize::Height(640);
+
+        assert_eq!(
+            select_resize(Some(&landscape), Some(&portrait), 1920, 1080),
+            Some(&landscape)
+        );
+        assert_eq!(
+            select_resize(Some(&landscape), Some(&portrait), 1080, 1920),
+            Some(&portrait)
+        );
+        assert_eq!(
+            select_resize(Some(&landscape), Some(&portrait), 1080, 1080),
+            None
+        );
+        assert_eq!(
+            select_resize(Some(&landscape), None, 1080, 1920),
+            Some(&landscape)
+        );
+        assert_eq!(
+            select_resize(None, Some(&portrait), 1920, 1080),
+            Some(&portrait)
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_resize_values() {
+        for value in [
+            "",
+            "0x",
+            "-1x",
+            "NaNx",
+            "640",
+            "0h",
+            "1.5w",
+            "640q",
+            "0.5x|640h",
+            "min()",
+            "min(0.5x)",
+            "min(0.5x,)",
+            "max(,640h)",
+        ] {
+            assert!(
+                parse_args(["--pid", "42", "--resize", value].map(str::to_owned)).is_err(),
+                "expected {value:?} to be rejected"
+            );
+        }
+        assert!(
+            parse_args(["--pid", "42", "--resize", "640w", "--list"].map(str::to_owned)).is_err()
+        );
+        assert!(parse_args(["--pid", "42", "-R", "640h", "--list"].map(str::to_owned)).is_err());
     }
 }

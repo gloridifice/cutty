@@ -22,9 +22,9 @@ Use this workflow whenever visual evidence from a Windows application is needed.
 3. Capture the desired window. Omit `--window` to use cutty's preferred normal titled window, or pass the zero-based index shown by `--list`:
 
    ```bash
-   cutty --pid <PID> --window <INDEX>
+   cutty --pid <PID> --window <INDEX> -r "min(0.5x, 540s)"
    # or
-   cutty --process <IMAGE_NAME.exe>
+   cutty --process <IMAGE_NAME.exe> -r "min(0.5x, 540s)"
    ```
 
    If `cutty` is not on `PATH` while working in its repository, use `target/release/cutty.exe` instead. Build it first with `cargo build --release` if necessary.
@@ -39,6 +39,10 @@ Use this workflow whenever visual evidence from a Windows application is needed.
 - If `--process` reports ambiguity, obtain the intended PID and retry with `--pid`; do not choose an instance arbitrarily.
 - Use `--list` and select `--window <INDEX>` when the default capture is not the relevant window.
 - If the intended process or window cannot be identified safely, ask the user for its executable name, PID, or distinguishing window title.
+
+## Default resize
+
+Run cutty with `-r "min(0.5x, 540s)"` by default. If the image's content is not clear to handle user's demand, re-cutty again with no `--resize` then re-read new clear image.
 
 ## Safety and limitations
 

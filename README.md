@@ -42,7 +42,30 @@ cutty --process notepad.exe --list
 cutty --pid 1234 --window 0
 ```
 
-未传 `--window` 时，工具优先截取第一个普通、有标题的候选窗口。输出示例：
+可使用 `-r` / `--resize` 在保存 PNG 前缩放图像。描述符 `x` 按比例缩放宽高，`h` 指定目标高度、宽度按原始宽高比适应，`w` 则指定目标宽度、高度自动适应。`s` 将较短边设为目标像素值，`b` 将较长边设为目标像素值：
+
+```powershell
+cutty --pid 1234 -r 0.5x # 宽和高均缩放为原来的 0.5 倍
+cutty --pid 1234 -r 640h # 高度为 640 像素，宽度保持比例
+cutty --pid 1234 -r 640w # 宽度为 640 像素，高度保持比例
+cutty --pid 1234 -r 540s # 较短边为 540 像素
+cutty --pid 1234 -r 1280b # 较长边为 1280 像素
+```
+
+可用表达式组合多个缩放限制。`min(A, B)` 取输出高度较小的结果，`max(A, B)` 取输出高度较大的结果；所有模式均保持原始宽高比，因此比较高度即可。表达式至少需要两个值，且可嵌套：
+
+```powershell
+cutty --pid 1234 -r "min(0.5x, 640h)"
+cutty --pid 1234 -r "max(0.5x, 640h)"
+```
+
+`-R` / `--resize-vertical` 接受与 `--resize` 完全相同的描述符和表达式。两者都提供时，`--resize` 只用于宽大于高的横向截图，`--resize-vertical` 只用于高大于宽的纵向截图；正方形截图不缩放。若只提供其中一个参数，则不论截图方向均使用该参数：
+
+```powershell
+cutty --pid 1234 -r "min(0.5x, 1280w)" -R "max(0.5x, 960h)"
+```
+
+缩放比例和像素值必须大于零；`--resize` 和 `--resize-vertical` 都不能和只列出窗口的 `--list` 一同使用。未传 `--window` 时，工具优先截取第一个普通、有标题的候选窗口。输出示例：
 
 ```text
 C:\Users\alice\AppData\Local\Temp\cutty-1234-1740000000000-5678-0.png
