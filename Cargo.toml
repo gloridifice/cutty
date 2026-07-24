@@ -1,6 +1,6 @@
 [package]
 name = "cutty"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Capture a top-level window belonging to a process and save it as a PNG"
 license = "MIT OR Apache-2.0"
