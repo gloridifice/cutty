@@ -39,7 +39,7 @@ jobs:
           "version=$tagVersion" >> $env:GITHUB_OUTPUT
 
       - name: Build release binary
-        run: cargo build --locked --release
+        run: cargo build --release
 
       - name: Create release archives
         shell: pwsh
