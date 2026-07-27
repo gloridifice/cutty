@@ -1,6 +1,6 @@
 ---
 name: cutty-window-inspection
-description: Captures Windows application windows with cutty and visually inspects the resulting PNG with the image-capable read tool. Use whenever a task requires seeing, checking, debugging, or verifying the current visual state of a desktop window or GUI, including layout, rendering, dialogs, controls, and screenshots.
+description: Captures Windows application windows or display monitors with cutty and visually inspects the resulting PNG with the image-capable read tool. Use whenever a task requires seeing, checking, debugging, or verifying the current visual state of a desktop window, display, or GUI, including layout, rendering, dialogs, controls, and screenshots.
 compatibility: Windows only; requires cutty on PATH or a built target/release/cutty.exe.
 ---
 
@@ -27,6 +27,12 @@ Use this workflow whenever visual evidence from a Windows application is needed.
    cutty --process <IMAGE_NAME.exe> -r "min(0.5x, 540s)"
    ```
 
+   To inspect the complete visible desktop of a display instead of a specific window, use `--monitor <INDEX>`; monitor `0` is primary, and remaining monitors are ordered by virtual-desktop position:
+
+   ```bash
+   cutty --monitor 0 -r "min(0.5x, 540s)"
+   ```
+
    If `cutty` is not on `PATH` while working in its repository, use `target/release/cutty.exe` instead. Build it first with `cargo build --release` if necessary.
 
 4. The successful command's stdout is the absolute path of a temporary PNG. Immediately call the `read` tool on that exact path. The command alone does not inspect the image.
@@ -38,7 +44,8 @@ Use this workflow whenever visual evidence from a Windows application is needed.
 - Prefer `--pid` when several instances of the same executable are running.
 - If `--process` reports ambiguity, obtain the intended PID and retry with `--pid`; do not choose an instance arbitrarily.
 - Use `--list` and select `--window <INDEX>` when the default capture is not the relevant window.
-- If the intended process or window cannot be identified safely, ask the user for its executable name, PID, or distinguishing window title.
+- Use `--monitor <INDEX>` when the entire visible display is the relevant target; it cannot be combined with `--pid`, `--process`, `--window`, or `--list`.
+- If the intended process, window, or display cannot be identified safely, ask the user for its executable name, PID, distinguishing window title, or monitor index.
 
 ## Default resize
 

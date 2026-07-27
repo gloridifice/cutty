@@ -1,6 +1,6 @@
 # cutty
 
-Windows 命令行截图工具：按 PID 或进程的可执行文件名定位其顶层窗口，并将 PNG **始终写入系统临时目录**。成功时标准输出只会打印生成文件的完整路径，方便脚本直接接收。
+Windows 命令行截图工具：可按 PID 或进程的可执行文件名定位其顶层窗口，也可截取整个显示器，并将 PNG **始终写入系统临时目录**。成功时标准输出只会打印生成文件的完整路径，方便脚本直接接收。
 
 ## 构建
 
@@ -14,7 +14,16 @@ cargo build --release
 
 ## 使用
 
-每个选项都提供短形式：`--pid` / `-p`、`--process` / `-P`、`--window` / `-w`、`--resize` / `-r`、`--resize-vertical` / `-R` 和 `--list` / `-l`。Clap 还提供 `--help` / `-h` 与 `--version` / `-V`。
+每个选项都提供短形式：`--pid` / `-p`、`--process` / `-P`、`--window` / `-w`、`--monitor` / `-m`、`--resize` / `-r`、`--resize-vertical` / `-R` 和 `--list` / `-l`。Clap 还提供 `--help` / `-h` 与 `--version` / `-V`。
+
+使用 `--monitor <INDEX>` 可截取指定显示器的完整可见桌面。`0` 始终是主显示器；其余显示器按虚拟桌面位置排序，先上后下、同一高度先左后右。它不能与进程目标选项、`--window` 或 `--list` 一起使用：
+
+```powershell
+cutty --monitor 0
+cutty --monitor 1 -r 1280b
+```
+
+显示器截图包含当前显示在该屏幕上的窗口；受保护内容和硬件叠加层仍可能无法截取。
 
 先列出指定进程的候选窗口：
 

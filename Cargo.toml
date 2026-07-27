@@ -1,8 +1,8 @@
 [package]
 name = "cutty"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
-description = "Capture a top-level window belonging to a process and save it as a PNG"
+description = "Capture a process window or display monitor and save it as a PNG"
 license = "MIT OR Apache-2.0"
 
 [dependencies]

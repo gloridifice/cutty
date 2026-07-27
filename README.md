@@ -1,6 +1,6 @@
 # cutty
 
-A Windows command-line screenshot tool. It locates a process's top-level window by PID or executable filename and **always writes the PNG to the system temporary directory**. On success, standard output contains only the full path of the generated file, making it convenient to consume from scripts.
+A Windows command-line screenshot tool. It captures a process's top-level window by PID or executable filename, or an entire display monitor, and **always writes the PNG to the system temporary directory**. On success, standard output contains only the full path of the generated file, making it convenient to consume from scripts.
 
 ## Quick Start
 
@@ -11,8 +11,9 @@ Download `cutty.exe` from the [releases page](https://github.com/gloridifice/cut
 Capture the preferred titled window for a process by executable name or PID:
 
 ```powershell
-.\cutty.exe --process foo.exe
-.\cutty.exe --pid 1234
+cutty -P foo.exe # capture window by [P]rocess name == --process
+cutty -p 1234    # capture window by [p]id          == --pid
+cutty -m 0       # capture desktop/[m]onitor        == --monitor
 ```
 
 On success, cutty prints only the absolute path of the PNG, for example:
@@ -24,11 +25,22 @@ C:\Users\alice\AppData\Local\Temp\cutty-1234-1740000000000-5678-0.png
 When a process has multiple windows, list its candidate windows first, then capture one by its zero-based index. Replace `1234` with the target process's PID:
 
 ```powershell
-.\cutty.exe --pid 1234 --list
-.\cutty.exe --pid 1234 --window 0
+cutty --pid 1234 --list
+cutty --pid 1234 --window 0 # or -w
 ```
 
-You can also use `.\cutty.exe --process foo.exe --list` to list candidate windows when exactly one matching process instance is running.
+You can also use `cutty --process foo.exe --list` to list candidate windows when exactly one matching process instance is running.
+
+### Capture a Desktop Monitor
+
+Capture the complete visible desktop of one monitor with `--monitor` / `-m`. Monitor `0` is always the primary display. Additional monitors are ordered by virtual-desktop position (top to bottom, then left to right), so the index is stable regardless of Windows' enumeration order:
+
+```powershell
+.\cutty.exe --monitor 0
+.\cutty.exe --monitor 1 -r 1280b
+```
+
+The monitor capture includes the windows currently visible on that display. Protected content and hardware overlays may still be absent.
 
 ### Agent Skill
 
@@ -50,7 +62,14 @@ The resulting executable is `target\release\cutty.exe`.
 
 ## Arguments
 
-Short forms are available for every option: `--pid` / `-p`, `--process` / `-P`, `--window` / `-w`, `--resize` / `-r`, `--resize-vertical` / `-R`, and `--list` / `-l`. Clap also provides `--help` / `-h` and `--version` / `-V`.
+Short forms are available for every option: `--pid` / `-p`, `--process` / `-P`, `--window` / `-w`, `--monitor` / `-m`, `--resize` / `-r`, `--resize-vertical` / `-R`, and `--list` / `-l`. Clap also provides `--help` / `-h` and `--version` / `-V`.
+
+Use `--monitor <INDEX>` to capture an entire display monitor. Monitor `0` is primary; additional monitors are ordered by virtual-desktop position, top to bottom and then left to right. It is mutually exclusive with the process target options, `--window`, and `--list`:
+
+```powershell
+cutty --monitor 0
+cutty --monitor 1 -r 1280b
+```
 
 First, list the candidate windows for a process:
 

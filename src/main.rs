@@ -6,12 +6,12 @@ use std::num::NonZeroU32;
 #[command(
     name = "cutty",
     version,
-    about = "Capture a top-level window belonging to a process and save it as a PNG",
+    about = "Capture a process window or display monitor and save it as a PNG",
     group(
         ArgGroup::new("target")
             .required(true)
             .multiple(false)
-            .args(["pid", "process"])
+            .args(["pid", "process", "monitor"])
     )
 )]
 struct CliArgs {
@@ -29,8 +29,17 @@ struct CliArgs {
     process: Option<String>,
 
     /// Choose a zero-based window from --list output.
-    #[arg(short = 'w', long = "window", value_name = "INDEX")]
+    #[arg(
+        short = 'w',
+        long = "window",
+        value_name = "INDEX",
+        conflicts_with = "monitor"
+    )]
     window_index: Option<usize>,
+
+    /// Capture the whole zero-based display monitor; monitor 0 is primary.
+    #[arg(short = 'm', long, value_name = "INDEX", conflicts_with = "list_only")]
+    monitor: Option<usize>,
 
     /// Resize landscape captures.
     #[arg(short = 'r', long, value_name = "VALUE", value_parser = parse_resize_value)]
@@ -69,13 +78,15 @@ impl From<CliArgs> for Args {
             pid,
             process,
             window_index,
+            monitor,
             resize,
             resize_vertical,
             list_only,
         } = cli;
-        let target = match (pid, process) {
-            (Some(pid), None) => Target::Pid(pid.get()),
-            (None, Some(process)) => Target::ProcessName(process),
+        let target = match (pid, process, monitor) {
+            (Some(pid), None, None) => Target::Pid(pid.get()),
+            (None, Some(process), None) => Target::ProcessName(process),
+            (None, None, Some(monitor)) => Target::Monitor(monitor),
             _ => unreachable!("clap validates the required target group"),
         };
 
@@ -93,6 +104,7 @@ impl From<CliArgs> for Args {
 enum Target {
     Pid(u32),
     ProcessName(String),
+    Monitor(usize),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -300,8 +312,9 @@ mod windows_capture {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use windows::Win32::Foundation::{HWND, LPARAM, RECT};
     use windows::Win32::Graphics::Gdi::{
-        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC,
-        DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, HBITMAP, HDC, HGDIOBJ, ReleaseDC,
+        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, CreateCompatibleBitmap,
+        CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC, DeleteObject, EnumDisplayMonitors, GetDC,
+        GetDIBits, GetMonitorInfoW, HBITMAP, HDC, HGDIOBJ, HMONITOR, MONITORINFO, ReleaseDC,
         SRCCOPY, SelectObject,
     };
     use windows::Win32::Storage::Xps::{PRINT_WINDOW_FLAGS, PrintWindow};
@@ -315,8 +328,8 @@ mod windows_capture {
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GWL_EXSTYLE, GetWindowLongPtrW, GetWindowPlacement, GetWindowRect,
         GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
-        PW_RENDERFULLCONTENT, SW_HIDE, SW_SHOWMINNOACTIVE, SW_SHOWNOACTIVATE, SetWindowPlacement,
-        ShowWindowAsync, WINDOWPLACEMENT, WS_EX_TOOLWINDOW,
+        MONITORINFOF_PRIMARY, PW_RENDERFULLCONTENT, SW_HIDE, SW_SHOWMINNOACTIVE, SW_SHOWNOACTIVATE,
+        SetWindowPlacement, ShowWindowAsync, WINDOWPLACEMENT, WS_EX_TOOLWINDOW,
     };
     use windows::core::{BOOL, PWSTR};
 
@@ -332,8 +345,18 @@ mod windows_capture {
         is_tool_window: bool,
     }
 
+    #[derive(Debug, Clone, Copy)]
+    struct MonitorInfo {
+        rect: RECT,
+        is_primary: bool,
+    }
+
     pub(super) fn run(args: Args) -> Result<()> {
         enable_per_monitor_dpi_awareness()?;
+        if let Target::Monitor(index) = &args.target {
+            return capture_monitor(*index, &args);
+        }
+
         let pid = resolve_pid(&args.target)?;
         let mut windows = windows_for_pid(pid)?;
         if windows.is_empty() {
@@ -394,6 +417,94 @@ mod windows_capture {
             .context("could not enable per-monitor DPI awareness")
     }
 
+    fn capture_monitor(index: usize, args: &Args) -> Result<()> {
+        let monitors = monitors()?;
+        let monitor = monitors.get(index).ok_or_else(|| {
+            anyhow!(
+                "monitor index {index} is out of range; {} monitor(s) are available (indices 0 through {})",
+                monitors.len(),
+                monitors.len() - 1
+            )
+        })?;
+        let (width, height, pixels) = capture_desktop(monitor.rect)
+            .with_context(|| format!("could not capture monitor {index}"))?;
+        let image = RgbImage::from_raw(width, height, pixels)
+            .ok_or_else(|| anyhow!("captured pixel buffer has an invalid size"))?;
+        let resize = select_resize(
+            args.resize.as_ref(),
+            args.resize_vertical.as_ref(),
+            width,
+            height,
+        );
+        let image = resize_image(image, resize)?;
+        let output = temporary_output_path(format!("monitor-{index}"));
+        save_png(&image, &output)?;
+
+        println!("{}", output.display());
+        Ok(())
+    }
+
+    fn monitors() -> Result<Vec<MonitorInfo>> {
+        let mut handles = Vec::new();
+        unsafe {
+            EnumDisplayMonitors(
+                None,
+                None,
+                Some(collect_monitor),
+                LPARAM((&mut handles as *mut Vec<HMONITOR>) as isize),
+            )
+        }
+        .ok()
+        .context("failed to enumerate display monitors")?;
+
+        let mut monitors: Vec<_> = handles
+            .into_iter()
+            .map(monitor_info)
+            .collect::<Result<_>>()?;
+        if monitors.is_empty() {
+            bail!("no display monitors are available");
+        }
+        // Windows does not define EnumDisplayMonitors' order. Make monitor 0 consistently
+        // primary, then order the other displays by their virtual-desktop position.
+        monitors.sort_by_key(|monitor| {
+            (
+                !monitor.is_primary,
+                monitor.rect.top,
+                monitor.rect.left,
+                monitor.rect.bottom,
+                monitor.rect.right,
+            )
+        });
+        Ok(monitors)
+    }
+
+    unsafe extern "system" fn collect_monitor(
+        monitor: HMONITOR,
+        _: HDC,
+        _: *mut RECT,
+        lparam: LPARAM,
+    ) -> BOOL {
+        // lparam was created from a mutable Vec in monitors and EnumDisplayMonitors invokes
+        // this callback synchronously, so it remains valid for this call.
+        let monitors = unsafe { &mut *(lparam.0 as *mut Vec<HMONITOR>) };
+        monitors.push(monitor);
+        BOOL(1)
+    }
+
+    fn monitor_info(monitor: HMONITOR) -> Result<MonitorInfo> {
+        let mut info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        unsafe { GetMonitorInfoW(monitor, &mut info) }
+            .ok()
+            .context("could not read monitor bounds")?;
+        Ok(MonitorInfo {
+            rect: info.rcMonitor,
+            is_primary: info.dwFlags & MONITORINFOF_PRIMARY != 0,
+        })
+    }
+
     fn resolve_pid(target: &Target) -> Result<u32> {
         match target {
             Target::Pid(pid) => Ok(*pid),
@@ -426,6 +537,9 @@ mod windows_capture {
                             .join(", ")
                     ),
                 }
+            }
+            Target::Monitor(_) => {
+                unreachable!("display monitor capture does not resolve a process")
             }
         }
     }
@@ -664,6 +778,51 @@ mod windows_capture {
         Ok((width, height, rgb))
     }
 
+    fn capture_desktop(rect: RECT) -> Result<(u32, u32, Vec<u8>)> {
+        let width = u32::try_from(rect.right - rect.left).context("monitor width is invalid")?;
+        let height = u32::try_from(rect.bottom - rect.top).context("monitor height is invalid")?;
+        if width == 0 || height == 0 {
+            bail!("monitor has an empty rectangle");
+        }
+        let width_i32 = i32::try_from(width).context("monitor is too wide to capture")?;
+        let height_i32 = i32::try_from(height).context("monitor is too tall to capture")?;
+        let pixel_count = usize::try_from(width)
+            .ok()
+            .and_then(|width| {
+                usize::try_from(height)
+                    .ok()
+                    .and_then(|height| width.checked_mul(height))
+            })
+            .ok_or_else(|| anyhow!("monitor is too large to capture"))?;
+        let byte_count = pixel_count
+            .checked_mul(4)
+            .ok_or_else(|| anyhow!("monitor is too large to capture"))?;
+
+        let surface = CaptureSurface::new(width_i32, height_i32)?;
+        unsafe {
+            BitBlt(
+                surface.memory_dc,
+                0,
+                0,
+                width_i32,
+                height_i32,
+                Some(surface.display_dc),
+                rect.left,
+                rect.top,
+                SRCCOPY | CAPTUREBLT,
+            )
+        }
+        .context("could not copy the monitor from the desktop")?;
+        let bgra = read_bitmap(&surface, width_i32, height_i32, height, byte_count)?;
+
+        // GDI provides 32-bit BGRX pixels. PNG RGB avoids treating the undefined X byte as alpha.
+        let mut rgb = Vec::with_capacity(pixel_count * 3);
+        for pixel in bgra.chunks_exact(4) {
+            rgb.extend_from_slice(&[pixel[2], pixel[1], pixel[0]]);
+        }
+        Ok((width, height, rgb))
+    }
+
     fn select_capture_bitmap(surface: &CaptureSurface) -> Result<()> {
         let selected = unsafe { SelectObject(surface.memory_dc, HGDIOBJ(surface.bitmap.0)) };
         if selected.is_invalid() {
@@ -762,7 +921,7 @@ mod windows_capture {
                     let _ = DeleteDC(memory_dc);
                     ReleaseDC(None, display_dc);
                 }
-                bail!("could not allocate a bitmap for the window");
+                bail!("could not allocate a bitmap for the capture");
             }
 
             let previous_bitmap = unsafe { SelectObject(memory_dc, HGDIOBJ(bitmap.0)) };
@@ -808,14 +967,14 @@ mod windows_capture {
         ))
     }
 
-    fn temporary_output_path(pid: u32) -> PathBuf {
+    fn temporary_output_path(target: impl std::fmt::Display) -> PathBuf {
         let milliseconds = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
         let sequence = OUTPUT_COUNTER.fetch_add(1, Ordering::Relaxed);
         env::temp_dir().join(format!(
-            "cutty-{pid}-{milliseconds}-{}-{sequence}.png",
+            "cutty-{target}-{milliseconds}-{}-{sequence}.png",
             std::process::id()
         ))
     }
@@ -892,6 +1051,31 @@ mod tests {
                 list_only: false,
             }
         );
+    }
+
+    #[test]
+    fn parses_monitor_target_and_rejects_window_only_options() {
+        assert_eq!(
+            parse_args(["-m", "0", "-r", "640w"].map(str::to_owned)).unwrap(),
+            Args {
+                target: Target::Monitor(0),
+                window_index: None,
+                resize: Some(Resize::Width(640)),
+                resize_vertical: None,
+                list_only: false,
+            }
+        );
+
+        for arguments in [
+            ["--monitor", "0", "--list"].as_slice(),
+            ["--monitor", "0", "--window", "0"].as_slice(),
+            ["--monitor", "0", "--pid", "42"].as_slice(),
+        ] {
+            assert!(
+                parse_args(arguments.iter().map(|argument| (*argument).to_owned())).is_err(),
+                "expected {arguments:?} to be rejected"
+            );
+        }
     }
 
     #[test]

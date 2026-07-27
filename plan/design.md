@@ -9,6 +9,12 @@ Windows 并没有一个“按进程截图”的单一 API：一个进程可以�
 
 工具在任何窗口/DC 调用之前设为 **Per-Monitor DPI Awareness V2**。否则在 125%、150% 等缩放屏幕上，`GetWindowRect` 会被 DPI 虚拟化为逻辑像素，而 `PrintWindow` 的 DC 以该逻辑尺寸创建，导致输出 PNG 比真实窗口小一个缩放比例。现在矩形与位图均使用目标显示器的物理像素，PNG 尺寸应与窗口的物理 `GetWindowRect` 尺寸相同。
 
+## 整个显示器截图
+
+`--monitor <INDEX>` 是与 `--pid`、`--process` 并列的目标，直接截取一个显示器的完整可见桌面。工具通过 `EnumDisplayMonitors` 枚举显示器，再用 `GetMonitorInfoW` 获取每个物理像素矩形和主屏标记。Windows 不保证枚举顺序，因此索引 `0` 固定为主显示器，其余显示器按虚拟桌面坐标从上到下、从左到右排序。
+
+选定显示器后，工具从桌面 DC 按该矩形执行 `BitBlt(SRCCOPY | CAPTUREBLT)`，然后沿用已有的 `GetDIBits` 和 PNG 编码流程。矩形可以具有负坐标，因此它适用于主屏左侧或上方的扩展屏幕。`CAPTUREBLT` 会尽量包含分层窗口；受保护内容、硬件覆盖层和部分 GPU 表面仍可能无法得到像素。显示器截图同样支持 `--resize` 和 `--resize-vertical`，但不支持仅用于进程窗口的 `--window`、`--list`。
+
 此方案没有使用交互式的 Windows Graphics Capture picker，因而适合非交互 CLI，也不需要屏幕录制授权。对于已经显示的普通窗口，工具只使用 `PrintWindow`，因此可以保持其不在前台。若目标窗口最小化或隐藏，工具会以 `SW_SHOWNOACTIVATE` **临时恢复而不激活**，等待重绘后在完成或失败时恢复原窗口状态。
 
 `PrintWindow` 是协作式 API：某些 GPU/Chromium/UWP 窗口会返回成功但只给出单色占位图。对临时恢复的窗口，工具会检测这种近乎单色的结果，回退到桌面 `BitBlt` 复制已重绘的物理区域；这会让该窗口短暂显示在屏幕上，但不会激活它。该回退不会用于原本已经显示的背景窗口，避免把遮挡它的其他窗口错误截入。受保护内容、提升权限的目标或无响应窗口仍可能无法捕获。
@@ -19,6 +25,8 @@ Windows 并没有一个“按进程截图”的单一 API：一个进程可以�
 - [PrintWindow function](https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-printwindow)
 - [ShowWindow function](https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-showwindow)
 - [BitBlt function](https://learn.microsoft.com/windows/win32/api/wingdi/nf-wingdi-bitblt)
+- [EnumDisplayMonitors function](https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-enumdisplaymonitors)
+- [GetMonitorInfoW function](https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-getmonitorinfow)
 - [GetDIBits function](https://learn.microsoft.com/windows/win32/api/wingdi/nf-wingdi-getdibits)（位图仍被选入 DC 时不能读取）
 - [SetProcessDpiAwarenessContext function](https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-setprocessdpiawarenesscontext)
 - [Screen capture - Windows apps](https://learn.microsoft.com/windows/uwp/audio-video-camera/screen-capture)
