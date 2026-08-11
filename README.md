@@ -1,5 +1,15 @@
 # cutty
 
+```
+ ██████╗██╗   ██╗████████╗████████╗██╗   ██╗
+██╔════╝██║   ██║╚══██╔══╝╚══██╔══╝╚██╗ ██╔╝
+██║     ██║   ██║   ██║      ██║    ╚████╔╝
+██║     ██║   ██║   ██║      ██║     ╚██╔╝
+╚██████╗╚██████╔╝   ██║      ██║      ██║
+ ╚═════╝ ╚═════╝    ╚═╝      ╚═╝      ╚═╝
+```
+
+
 A Windows command-line screenshot tool. It captures a process's top-level window by PID or executable filename, or an entire display monitor, and **always writes the PNG to the system temporary directory**. On success, standard output contains only the full path of the generated file, making it convenient to consume from scripts.
 
 ## Quick Start
