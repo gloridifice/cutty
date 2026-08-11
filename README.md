@@ -8,7 +8,7 @@
 
 `cutty` is a lightweight Windows CLI screenshot tool that captures a process window or monitor and outputs the temporary PNG path.
 
-`cutty` is agent friendly, when you `cutty`'s skill, `cutty` will automatically resize the output image into low resolution for saving your token.
+`cutty` is agent friendly, when using `cutty`'s skill, `cutty` will automatically resize the output image into low resolution for saving your token.
 
 ## Quick Start
 
