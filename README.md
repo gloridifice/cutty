@@ -1,15 +1,14 @@
-# cutty
-
 ```
              _   _
-     __ _  _| |_| |_ _  _
-    / _| || |  _|  _| || |
-    \__|\_,_|\__|\__|\_, |
-                     |__/
+    __ _  _| |_| |_ _  _
+   / _| || |  _|  _| || |
+   \__|\_,_|\__|\__|\_, |
+                    |__/
 ```
 
+`cutty` is a lightweight Windows CLI screenshot tool that captures a process window or monitor and outputs the temporary PNG path.
 
-A Windows command-line screenshot tool. It captures a process's top-level window by PID or executable filename, or an entire display monitor, and **always writes the PNG to the system temporary directory**. On success, standard output contains only the full path of the generated file, making it convenient to consume from scripts.
+`cutty` is agent friendly, when you `cutty`'s skill, `cutty` will automatically resize the output image into low resolution for saving your token.
 
 ## Quick Start
 
@@ -20,9 +19,9 @@ Download `cutty.exe` from the [releases page](https://github.com/gloridifice/cut
 Capture the preferred titled window for a process by executable name or PID:
 
 ```powershell
-cutty -P foo.exe # capture window by [P]rocess name == --process
-cutty -p 1234    # capture window by [p]id          == --pid
-cutty -m 0       # capture desktop/[m]onitor        == --monitor
+cutty -P foo.exe # capture window by [P]rocess name -P = --process
+cutty -p 1234    # capture window by [p]id          -p = --pid
+cutty -m 0       # capture desktop/[m]onitor        -m = --monitor
 ```
 
 On success, cutty prints only the absolute path of the PNG, for example:
